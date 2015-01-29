@@ -54,6 +54,7 @@ import time
 import inspect
 import keyword
 import tokenize
+from itertools import chain
 from optparse import OptionParser
 from fnmatch import fnmatch
 try:
@@ -1924,25 +1925,70 @@ def get_parser(prog='pep8', version=__version__):
     return parser
 
 
+def all_subpaths(path):
+    """Return a list of all subpaths of given path
+
+    The returned list will be in the order of [os.curdir, ... , '/']
+    """
+    path = os.path.abspath(path)
+    paths = [path]
+    head, _ = os.path.split(path)
+    while head != '/':
+        paths.append(head)
+        head, _ = os.path.split(head)
+    return paths
+
+
 def read_config(options, args, arglist, parser):
-    """Read both user configuration and local configuration."""
+    """Read configuration options from all available config files
+
+    Configuration files are read using ConfigParser.RawConfigParser.read() in
+    the following order:
+
+        * $XDG_CONFIG_HOME/pep8
+        * ~\pep8  # Windows
+        * ~/.config/pep8  # Not Windows
+        * .../my_module/{setup.cfg, tox.ini, .pep}
+        * --config
+    """
     config = RawConfigParser()
 
-    user_conf = options.config
-    if user_conf and os.path.isfile(user_conf):
-        if options.verbose:
-            print('user configuration: %s' % user_conf)
-        config.read(user_conf)
+    # Configuration from commandline
+    cli_conf = options.config or ''
 
-    local_dir = os.curdir
-    parent = tail = args and os.path.abspath(os.path.commonprefix(args))
-    while tail:
-        if config.read([os.path.join(parent, fn) for fn in PROJECT_CONFIG]):
-            local_dir = parent
-            if options.verbose:
-                print('local configuration: in %s' % parent)
-            break
-        (parent, tail) = os.path.split(parent)
+    # Configuration from user home directory
+    try:
+        if sys.platform == 'win32':
+            user_conf = os.path.expanduser(r'~\.pep8')
+        else:
+            user_conf = os.path.expanduser('~/.config/pep8')
+    except ImportError:
+        # Work around bug in Google App Engine; issue #249
+        user_conf = ''
+
+    # Configuration from XDG_CONFIG_HOME
+    try:
+        xdg_conf = os.path.join(os.getenv('XDG_CONFIG_HOME'), 'pep8')
+    except AttributeError:
+        # os.getenv() returned None, can't join(None, 'pep8')
+        xdg_conf = ''
+
+    # Configuration files in directories at or above current directory
+    local_confs = [
+        os.path.join(path, fn)
+        for path in all_subpaths(os.curdir)[::-1]  # Search starting at '/'
+        for fn in PROJECT_CONFIG
+    ]
+
+    for conf in chain([xdg_conf, user_conf], local_confs, [cli_conf]):
+        loaded = config.read(conf)
+        if options.verbose:
+            print('Loaded Configuration: %s' % loaded)
+        # Optional addition to show the config that was loaded from each
+        # if options.show_config:
+        #     for fn in loaded:
+        #         for line in open(fn):
+        #             print(line.rstrip())
 
     pep8_section = parser.prog
     if config.has_section(pep8_section):
